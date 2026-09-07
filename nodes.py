@@ -8247,6 +8247,84 @@ class Trellis2Pixal3DLoadMultiViewFolder:
                       'mesh_scale': float(views['mesh_scale'])}
 
         return (views, cam_config, pixal3d_views_to_preview(views),)
+        
+class Trellis2SelectImagesForPixal3DMultiView:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "firstimage": ("STRING",{"default":""}),
+                "preprocess": ("BOOLEAN",{"default":False}),
+                "padding": ("INT",{"default":0,"min":0,"max":1024}),
+                "remove_background": ("BOOLEAN",{"default":False}),
+                "max_size": ("INT",{"default":2048,"min":512,"max":8192,"step":128}),
+                "azimuths": ("STRING",{"default":"0"}),
+                "elevations": ("STRING", {"default":"0"}),
+            },
+            "optional":{
+                "secondimage": ("STRING",{"default":""}),
+                "thirdimage": ("STRING",{"default":""}),
+                "fourthimage": ("STRING",{"default":""})
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING",)
+    RETURN_NAMES = ("images", "azimuths", "elevations",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+
+    def load_view(self, path):
+        """Resolve a path (absolute, or relative to the ComfyUI input dir) to an IMAGE tensor."""
+        if path is None or str(path).strip() == '':
+            return None
+
+        path = str(path).strip()
+        if not os.path.exists(path):
+            path = os.path.join(folder_paths.get_input_directory(), path)
+            if not os.path.exists(path):
+                return None
+
+        image = Image.open(path)
+        image = image.convert("RGBA" if 'A' in image.getbands() else "RGB")
+        return pil2tensor(image)
+
+    def process(self, firstimage, preprocess, padding, remove_background, max_size, azimuths, elevations, secondimage = None, thirdimage = None, fourthimage = None):
+
+        first_image = self.load_view(firstimage)
+        second_image = self.load_view(secondimage)
+        third_image = self.load_view(thirdimage)
+        fourth_image = self.load_view(fourthimage)
+
+        if first_image is None:
+            raise ValueError(f"Trellis2SelectImagesForPixal3DMultiView: could not find firstimage image '{firstimage}'")
+
+        allimages = []
+
+        if preprocess:
+            t2preprocess = Trellis2PreProcessImage()
+
+            # process() is a ComfyUI node function: it returns a 1-tuple, so unwrap it.
+            if first_image is not None:
+                first_image = t2preprocess.process(first_image, padding, remove_background, max_size)[0]                
+            if second_image is not None:
+                second_image = t2preprocess.process(second_image, padding, remove_background, max_size)[0]
+            if third_image is not None:
+                third_image = t2preprocess.process(third_image, padding, remove_background, max_size)[0]
+            if fourth_image is not None:
+                fourth_image = t2preprocess.process(fourth_image, padding, remove_background, max_size)[0]
+
+        if first_image is not None:
+            allimages.append(first_image)
+        if second_image is not None:
+            allimages.append(second_image)
+        if third_image is not None:
+            allimages.append(third_image)
+        if fourth_image is not None:
+            allimages.append(fourth_image)
+        
+        output_images = torch.cat(allimages, dim=0)
+
+        return (output_images, azimuths, elevations, )        
 
 NODE_CLASS_MAPPINGS = {
     "Trellis2LoadModel": Trellis2LoadModel,
@@ -8326,6 +8404,7 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2SmoothTrimeshWithPyMeshlab": Trellis2SmoothTrimeshWithPyMeshlab,
     "Trellis2Pixal3DMultiViewConfig": Trellis2Pixal3DMultiViewConfig,
     "Trellis2Pixal3DLoadMultiViewFolder": Trellis2Pixal3DLoadMultiViewFolder,
+    "Trellis2SelectImagesForPixal3DMultiView": Trellis2SelectImagesForPixal3DMultiView,
     }
     
 
@@ -8407,4 +8486,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2SmoothTrimeshWithPyMeshlab": "Trellis2 - Smooth Trimesh With PyMeshlab",
     "Trellis2Pixal3DMultiViewConfig": "Trellis2 - Pixal3D MultiView Config",
     "Trellis2Pixal3DLoadMultiViewFolder": "Trellis2 - Pixal3D Load MultiView Folder",
+    "Trellis2SelectImagesForPixal3DMultiView": "Trellis2 - Select Images For Pixal3D MultiView",
     }
