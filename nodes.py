@@ -334,12 +334,26 @@ def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=Fal
         torch.cat(uvw_list) if return_uvw else None
     )    
 
+def check_pixal3d_mv_pipeline(pipeline):
+    """
+    The multi-view conditioning only lines up with the *_mv denoisers.
+
+    Feeding it to the single-view checkpoints silently produces garbage rather
+    than an error, so refuse it here: the pipeline has to have been loaded with
+    pixal3d_multiview on (pipeline_mv.json).
+    """
+    if not getattr(pipeline, 'isPixal3DMV', False):
+        raise Exception(
+            'pixal3d_mv_views needs the Pixal3D multi-view weights. Turn on '
+            '"pixal3d_multiview" in Trellis2 - LoadModel (loads pipeline_mv.json / ckpts/*_mv).')
+
+
 class Trellis2LoadModel:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "modelname": (["microsoft/TRELLIS.2-4B","visualbruno/TRELLIS.2-4B-FP8","TencentARC/Pixal3D-T"],{"default":"microsoft/TRELLIS.2-4B"}),
+                "modelname": (["microsoft/TRELLIS.2-4B","visualbruno/TRELLIS.2-4B-FP8","TencentARC/Pixal3D"],{"default":"microsoft/TRELLIS.2-4B"}),
                 "backend": (["flash_attn","xformers","sdpa","flash_attn_3"],{"default":"flash_attn"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -347,6 +361,7 @@ class Trellis2LoadModel:
                 "conv_backend": (["spconv","torchsparse","flex_gemm"],{"default":"flex_gemm"}),
                 "sparse_backend": (["xformers","flash_attn"],{"default":"flash_attn"}),
                 "use_reconviagen": ("BOOLEAN",{"default":False}),
+                "pixal3d_multiview": ("BOOLEAN",{"default":False,"tooltip":"Pixal3D only: load the multi-view denoisers (pipeline_mv.json / ckpts/*_mv) instead of the single-view ones"}),
                 #"naf_chunk_size":(["None","144","208","272","336","400","464","528","592","656","720","784","848","912","976","1024"],{"default":"None"}),
             }
         }
@@ -357,7 +372,7 @@ class Trellis2LoadModel:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, modelname, backend, device, low_vram, keep_models_loaded, conv_backend, sparse_backend, use_reconviagen):    
+    def process(self, modelname, backend, device, low_vram, keep_models_loaded, conv_backend, sparse_backend, use_reconviagen, pixal3d_multiview = False):
         import requests
         
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
@@ -384,7 +399,18 @@ class Trellis2LoadModel:
                 local_dir=model_path,
                 local_dir_use_symlinks=False,
             )
-        
+        elif pixal3d_multiview and not os.path.exists(os.path.join(model_path,'pipeline_mv.json')):
+            # A Pixal3D folder downloaded before the multi-view release has no
+            # pipeline_mv.json / ckpts/*_mv. snapshot_download skips what is already
+            # there, so this only pulls the missing multi-view files.
+            print(f"Multi-view weights missing in {model_path}, downloading them ...")
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=modelname,
+                local_dir=model_path,
+                local_dir_use_symlinks=False,
+            )
+
         reconviagen_pipeline_file = os.path.join(folder_paths.models_dir,'microsoft','TRELLIS.2-4B','reconviagen_pipeline.json')
         if not os.path.exists(reconviagen_pipeline_file):
             source_reconviagen_pipeline_file = os.path.join(script_directory,'reconviagen_pipeline.json')
@@ -440,7 +466,7 @@ class Trellis2LoadModel:
             else:
                 raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
         
-        if use_reconviagen and modelname == 'TencentARC/Pixal3D-T':
+        if use_reconviagen and modelname == 'TencentARC/Pixal3D':
             raise Exception('Model TencentARC/Pixal3D-T is not compatible with ReconViaGen')
         
         if use_reconviagen:
@@ -516,10 +542,13 @@ class Trellis2LoadModel:
             use_fp8 = False
         
         isPixal3D = False
-        if modelname == "TencentARC/Pixal3D-T":
+        if modelname == "TencentARC/Pixal3D":
             isPixal3D = True
-        
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded, use_fp8=use_fp8, use_reconviagen=use_reconviagen, isPixal3D = isPixal3D)
+
+        if pixal3d_multiview and not isPixal3D:
+            raise Exception('pixal3d_multiview only applies to TencentARC/Pixal3D')
+
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded, use_fp8=use_fp8, use_reconviagen=use_reconviagen, isPixal3D = isPixal3D, isPixal3DMV = pixal3d_multiview)
         pipeline.low_vram = low_vram
         
         # if naf_chunk_size == "None":
@@ -4473,7 +4502,8 @@ class Trellis2SparseGenerator:
             },
             "optional":{
                 "image":("IMAGE",),
-                "moge_camera_config":("MOGE_CAM_CONFIG",)
+                "moge_camera_config":("MOGE_CAM_CONFIG",),
+                "pixal3d_mv_views":("PIXAL3D_MV_VIEWS",)
             }
         }
 
@@ -4502,8 +4532,9 @@ class Trellis2SparseGenerator:
         dino_foundation_cap,
         keep_only_shell,
         image = None,
-        moge_camera_config = None
-        ):               
+        moge_camera_config = None,
+        pixal3d_mv_views = None
+        ):
         self.seed_all(seed)
         
         sparse_structure_guidance_interval = [sparse_structure_guidance_interval_start,sparse_structure_guidance_interval_end]        
@@ -4514,31 +4545,44 @@ class Trellis2SparseGenerator:
         pipeline.sparse_structure_sampler = getattr(samplers, f"Flow{sparse_sampler_prefix}GuidanceIntervalSampler")(**args['sparse_structure_sampler']['args'])
 
         if pipeline.isPixal3D:
-            if image is not None:
-                images = tensor_batch_to_pil_list(image, max_views=16)                
-                images = list(images)
-            else:
-                raise Exception('Image is required for Pixal3D')
-                
-            if moge_camera_config is not None:
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-            else:
-                raise Exception('MoGe Camera Config is required for Pixal3D')
+            if pixal3d_mv_views is not None:
+                check_pixal3d_mv_pipeline(pipeline)
 
-            image_cond_model = pipeline.load_pixal3d_image_cond_ss()            
-        
-            image_cond = pipeline.get_proj_cond_ss(
-                image=images,
-                camera_angle_x=camera_angle_x,
-                distance=distance,
-                mesh_scale=mesh_scale,
-                image_cond_model=image_cond_model
-            )
-            
-            if not pipeline.keep_models_loaded:
-                pipeline.unload_pixal3d_image_cond_ss()
+                image_cond_model = pipeline.load_pixal3d_mv_image_cond_ss()
+
+                image_cond = pipeline.get_proj_cond_ss_mv(
+                    pixal3d_mv_views,
+                    image_cond_model=image_cond_model
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_mv_image_cond_ss()
+            else:
+                if image is not None:
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    images = list(images)
+                else:
+                    raise Exception('Image is required for Pixal3D')
+
+                if moge_camera_config is not None:
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+                else:
+                    raise Exception('MoGe Camera Config is required for Pixal3D')
+
+                image_cond_model = pipeline.load_pixal3d_image_cond_ss()
+
+                image_cond = pipeline.get_proj_cond_ss(
+                    image=images,
+                    camera_angle_x=camera_angle_x,
+                    distance=distance,
+                    mesh_scale=mesh_scale,
+                    image_cond_model=image_cond_model
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_image_cond_ss()
                 
         pipeline.load_sparse_structure_model()
         
@@ -4595,7 +4639,8 @@ class Trellis2ShapeGenerator:
             {
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
-            }    
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("SHAPE_SLAT", "INT", "TRELLIS2PIPELINE",)
@@ -4618,43 +4663,56 @@ class Trellis2ShapeGenerator:
         dino_substeps,
         dino_foundation_cap,
         image = None,
-        moge_camera_config = None
+        moge_camera_config = None,
+        pixal3d_mv_views = None
         ):
-            
-        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]        
-        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}            
-        
+
+        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]
+        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}
+
         args = pipeline._pretrained_args
         shape_sampler_prefix = pipeline.GetSamplerName(shape_sampler)
-        pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])                    
-        
+        pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])
+
         if resolution == 512:
             pipeline.unload_shape_slat_flow_model_1024()
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_512()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, coords,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_shape_512()
                 else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_shape_512()
-                    
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_shape_512()
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_shape_512()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_shape_512()
             
             pipeline.load_shape_slat_flow_model_512()
             
@@ -4674,29 +4732,41 @@ class Trellis2ShapeGenerator:
             pipeline.unload_shape_slat_flow_model_512()            
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, coords,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_shape_1024()
                 else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()               
-                    
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_shape_1024()
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_shape_1024()
             
             pipeline.load_shape_slat_flow_model_1024()
             
@@ -4742,7 +4812,8 @@ class Trellis2ShapeCascadeGenerator:
             {
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
-            }              
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("SHAPE_SLAT","INT","TRELLIS2PIPELINE","INT",)
@@ -4765,23 +4836,24 @@ class Trellis2ShapeCascadeGenerator:
         dino_substeps,
         dino_foundation_cap,
         image = None,
-        moge_camera_config = None
+        moge_camera_config = None,
+        pixal3d_mv_views = None
         ):
-            
-        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]        
-        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}                    
-        
+
+        shape_guidance_interval = [shape_guidance_interval_start, shape_guidance_interval_end]
+        shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}
+
         args = pipeline._pretrained_args
         shape_sampler_prefix = pipeline.GetSamplerName(shape_sampler)
         pipeline.shape_slat_sampler = getattr(samplers, f"Flow{shape_sampler_prefix}GuidanceIntervalSampler")(**args['shape_slat_sampler']['args'])
-        slat, hr_resolution, num_tokens = self.sample(pipeline, shape_slat, from_resolution, to_resolution, sparse_structure_resolution, max_num_tokens, image_cond, shape_slat_sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config)
+        slat, hr_resolution, num_tokens = self.sample(pipeline, shape_slat, from_resolution, to_resolution, sparse_structure_resolution, max_num_tokens, image_cond, shape_slat_sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config, pixal3d_mv_views)
         
         if not pipeline.keep_models_loaded:
             pipeline.unload_shape_slat_flow_model_1024()              
         
         return (slat, hr_resolution, pipeline, num_tokens,)         
         
-    def sample(self, pipeline, slat, lr_resolution, resolution, sparse_structure_resolution, max_num_tokens, cond, sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config):
+    def sample(self, pipeline, slat, lr_resolution, resolution, sparse_structure_resolution, max_num_tokens, cond, sampler_params, verbose, dino_lock, dino_substeps, dino_foundation_cap, image, moge_camera_config, pixal3d_mv_views = None):
         # Upsample       
         pipeline.load_shape_slat_decoder()
         if pipeline.low_vram:
@@ -4821,32 +4893,45 @@ class Trellis2ShapeCascadeGenerator:
                 break
                 
         if pipeline.isPixal3D:
-            images = tensor_batch_to_pil_list(image, max_views=16)
-            image_in = images[0] if len(images) == 1 else images        
-            
-            if isinstance(image_in, (list, tuple)):
-                images = list(image_in)
-            else:
-                images = [image_in]
-                
-            camera_angle_x = moge_camera_config['camera_angle_x']
-            distance = moge_camera_config['distance']
-            mesh_scale = moge_camera_config['mesh_scale']
-            
-            image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
-                
             actual_grid_res = hr_resolution // 16
-                
-            cond = pipeline.get_proj_cond_shape(
-                image_cond_model, images, coords,
-                camera_angle_x=camera_angle_x,
-                distance=distance,
-                mesh_scale=mesh_scale,
-                grid_resolution_override=actual_grid_res,
-            )
-            
-            if not pipeline.keep_models_loaded:
-                pipeline.unload_pixal3d_image_cond_shape_1024()
+
+            if pixal3d_mv_views is not None:
+                check_pixal3d_mv_pipeline(pipeline)
+
+                image_cond_model = pipeline.load_pixal3d_mv_image_cond_shape_1024()
+
+                cond = pipeline.get_proj_cond_shape_mv(
+                    image_cond_model, pixal3d_mv_views, coords,
+                    grid_resolution_override=actual_grid_res,
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_mv_image_cond_shape_1024()
+            else:
+                images = tensor_batch_to_pil_list(image, max_views=16)
+                image_in = images[0] if len(images) == 1 else images
+
+                if isinstance(image_in, (list, tuple)):
+                    images = list(image_in)
+                else:
+                    images = [image_in]
+
+                camera_angle_x = moge_camera_config['camera_angle_x']
+                distance = moge_camera_config['distance']
+                mesh_scale = moge_camera_config['mesh_scale']
+
+                image_cond_model = pipeline.load_pixal3d_image_cond_shape_1024()
+
+                cond = pipeline.get_proj_cond_shape(
+                    image_cond_model, images, coords,
+                    camera_angle_x=camera_angle_x,
+                    distance=distance,
+                    mesh_scale=mesh_scale,
+                    grid_resolution_override=actual_grid_res,
+                )
+
+                if not pipeline.keep_models_loaded:
+                    pipeline.unload_pixal3d_image_cond_shape_1024()
         
         pipeline.load_shape_slat_flow_model_1024()
         flow_model = pipeline.models['shape_slat_flow_model_1024']
@@ -4915,7 +5000,8 @@ class Trellis2TexSlatGenerator:
                 "image": ("IMAGE",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
                 "from_resolution": ("INT",),
-            }            
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+            }
         }
 
     RETURN_TYPES = ("TEXTURE_SLAT", "TRELLIS2PIPELINE",)
@@ -4939,7 +5025,8 @@ class Trellis2TexSlatGenerator:
         dino_foundation_cap,
         image = None,
         moge_camera_config = None,
-        from_resolution = None
+        from_resolution = None,
+        pixal3d_mv_views = None
         ):
 
         texture_guidance_interval = [texture_guidance_interval_start,texture_guidance_interval_end]
@@ -4968,32 +5055,45 @@ class Trellis2TexSlatGenerator:
                 pipeline.unload_tex_slat_flow_model_512()            
             
             if pipeline.isPixal3D:
-                images = tensor_batch_to_pil_list(image, max_views=16)
-                image_in = images[0] if len(images) == 1 else images        
-                
-                if isinstance(image_in, (list, tuple)):
-                    images = list(image_in)
-                else:
-                    images = [image_in]
-                    
-                camera_angle_x = moge_camera_config['camera_angle_x']
-                distance = moge_camera_config['distance']
-                mesh_scale = moge_camera_config['mesh_scale']
-                
-                image_cond_model = pipeline.load_pixal3d_image_cond_tex_1024()
-                
                 tex_grid_res = from_resolution // 16
-                
-                image_cond = pipeline.get_proj_cond_shape(
-                    image_cond_model, images, shape_slat.coords,
-                    camera_angle_x=camera_angle_x,
-                    distance=distance,
-                    mesh_scale=mesh_scale,
-                    grid_resolution_override=tex_grid_res,
-                )
-                
-                if not pipeline.keep_models_loaded:
-                    pipeline.unload_pixal3d_image_cond_tex_1024()
+
+                if pixal3d_mv_views is not None:
+                    check_pixal3d_mv_pipeline(pipeline)
+
+                    image_cond_model = pipeline.load_pixal3d_mv_image_cond_tex_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape_mv(
+                        image_cond_model, pixal3d_mv_views, shape_slat.coords,
+                        grid_resolution_override=tex_grid_res,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_mv_image_cond_tex_1024()
+                else:
+                    images = tensor_batch_to_pil_list(image, max_views=16)
+                    image_in = images[0] if len(images) == 1 else images
+
+                    if isinstance(image_in, (list, tuple)):
+                        images = list(image_in)
+                    else:
+                        images = [image_in]
+
+                    camera_angle_x = moge_camera_config['camera_angle_x']
+                    distance = moge_camera_config['distance']
+                    mesh_scale = moge_camera_config['mesh_scale']
+
+                    image_cond_model = pipeline.load_pixal3d_image_cond_tex_1024()
+
+                    image_cond = pipeline.get_proj_cond_shape(
+                        image_cond_model, images, shape_slat.coords,
+                        camera_angle_x=camera_angle_x,
+                        distance=distance,
+                        mesh_scale=mesh_scale,
+                        grid_resolution_override=tex_grid_res,
+                    )
+
+                    if not pipeline.keep_models_loaded:
+                        pipeline.unload_pixal3d_image_cond_tex_1024()
             
             pipeline.load_tex_slat_flow_model_1024()
             
@@ -7880,6 +7980,274 @@ class Trellis2SelectImagesForMultiView:
         return (front_image, back_image, left_image, right_image, )
         
         
+def comfy_images_to_rgba_pils(images, masks=None, invert_mask=False, remove_background=False,
+                              max_views=16):
+    """
+    Turn a ComfyUI IMAGE batch into the RGBA PIL views the Pixal3D MV path expects.
+
+    Alpha is taken, in order of preference, from an explicit MASK input, from the
+    image's own alpha channel, or from rembg. The views are never cropped or
+    rescaled here: transforms.json describes the framing as given, so changing it
+    would break the correspondence between the pixels and the cameras.
+    """
+    if not isinstance(images, torch.Tensor):
+        raise TypeError(f"Expected torch.Tensor for IMAGE, got {type(images)}")
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+    if images.ndim != 4:
+        raise ValueError(f"Unsupported IMAGE tensor shape: {tuple(images.shape)}")
+
+    V = min(int(images.shape[0]), int(max_views))
+    if V < int(images.shape[0]):
+        print(f"[Pixal3D MV] Warning: {images.shape[0]} views given, using the first {V}")
+
+    if masks is not None:
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        if masks.shape[0] != images.shape[0]:
+            raise ValueError(
+                f"got {images.shape[0]} images but {masks.shape[0]} masks")
+
+    out = []
+    for i in range(V):
+        img = images[i]
+        alpha = None
+
+        if masks is not None:
+            alpha = masks[i].detach().cpu().float().clamp(0, 1)
+            if invert_mask:
+                alpha = 1.0 - alpha
+            if alpha.shape != img.shape[:2]:
+                alpha = F.interpolate(
+                    alpha[None, None], size=tuple(img.shape[:2]),
+                    mode='bilinear', align_corners=False)[0, 0]
+        elif img.shape[-1] == 4:
+            a = img[..., 3].detach().cpu().float().clamp(0, 1)
+            # A fully opaque alpha channel counts as no mask, as in preprocess_image.
+            if not torch.all(a >= 254.0 / 255.0):
+                alpha = a
+
+        rgb = img[..., :3].detach().cpu().float().clamp(0, 1)
+        pil = Image.fromarray((rgb.numpy() * 255.0).astype(np.uint8), mode='RGB')
+
+        if alpha is None:
+            if not remove_background:
+                raise ValueError(
+                    f"view {i} has no alpha channel and no mask. Give it a MASK, an "
+                    f"RGBA image, or turn remove_background on.")
+            from rembg import remove
+            pil = remove(pil).convert('RGBA')
+        else:
+            pil = pil.convert('RGBA')
+            pil.putalpha(Image.fromarray((alpha.numpy() * 255.0).astype(np.uint8), mode='L'))
+
+        out.append(pil)
+
+    return out
+
+
+def pixal3d_views_to_preview(views):
+    """The alpha-premultiplied 512px views, as a ComfyUI IMAGE batch, for previewing."""
+    size = min(views['images'].keys())
+    return views['images'][size][0].permute(0, 2, 3, 1).contiguous().cpu()
+
+
+class Trellis2Pixal3DMultiViewConfig:
+    """
+    Build the Pixal3D multi-view conditioning bundle from a batch of posed views.
+
+    The first image is the MAIN view and its pose must be the canonical front view
+    (azimuth 0, elevation 0), because every other view is placed relative to it.
+    Azimuth / elevation follow the same convention as
+    Trellis2RenderMultiViewNvdiffrast: 0/90/180/270 -> front/left/back/right, and
+    positive elevation is above the object.
+
+    fov / distance / mesh_scale describe the camera the views were SHOT with, and
+    the views are never cropped or rescaled here, so they have to match how the
+    images are actually framed. Getting the distance wrong scales the whole
+    projection: at 10% too near, the surface of the model samples the background
+    instead of itself, which shows up as washed-out texture long before the mesh
+    suffers. `framing` picks how the distance is derived:
+
+      auto         measure the object in the alpha channel and fit the distance to
+                   it. Works whatever the margin is; the default.
+      pixal3d_rig  the rig the multi-view weights were trained on, 10% margin
+                   (the shipped example: fov 20 deg, distance 3.1192).
+      fill_frame   object touches the frame edges. This is what
+                   Trellis2PreProcessImage produces and what
+                   Trellis2FovMoGeCameraConfig assumes, so it is right for views
+                   you cropped yourself and wrong for raw renders.
+      camera_config  take the distance from the wired moge_camera_config.
+
+    A distance widget above 0 always wins. A wired moge_camera_config supplies fov
+    and mesh_scale; its distance is only used by framing = camera_config.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "azimuths": ("STRING", {"default": "0,90,180,270"}),
+                "elevations": ("STRING", {"default": "0,0,0,0"}),
+                "fov": ("FLOAT", {"default": 20.0, "min": 0.001, "max": 179.999, "step": 0.001}),
+                "fov_unit": (["deg", "rad"], {"default": "deg"}),
+                "mesh_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 9.9, "step": 0.1}),
+                "distance": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 99.99, "step": 0.0001,
+                                       "tooltip": "0 = derive it from `framing`. Above 0 always wins."}),
+                "remove_background": ("BOOLEAN", {"default": False}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+                "framing": (["auto", "pixal3d_rig", "fill_frame", "camera_config"],
+                            {"default": "auto",
+                             "tooltip": "How to derive the camera distance. auto = fit it to the "
+                                        "object in the alpha channel; pixal3d_rig = the 10% margin "
+                                        "the MV weights were trained on; fill_frame = object touches "
+                                        "the frame edges (what Trellis2PreProcessImage produces)."}),
+            },
+            "optional": {
+                "masks": ("MASK",),
+                "moge_camera_config": ("MOGE_CAM_CONFIG",),
+            }
+        }
+
+    RETURN_TYPES = ("PIXAL3D_MV_VIEWS", "MOGE_CAM_CONFIG", "IMAGE",)
+    RETURN_NAMES = ("pixal3d_mv_views", "moge_camera_config", "preview",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, images, azimuths, elevations, fov, fov_unit, mesh_scale, distance,
+                remove_background, invert_mask, framing="auto", masks=None,
+                moge_camera_config=None):
+        from .trellis2.utils import mv_camera
+
+        az_list = Trellis2ImagesToViewConfigs()._parse_angles(azimuths)
+        el_list = Trellis2ImagesToViewConfigs()._parse_angles(elevations)
+        if not az_list or not el_list:
+            raise Exception("azimuths and elevations are required")
+        if len(az_list) != len(el_list):
+            raise Exception("azimuths and elevations must have the same amount of values")
+
+        if moge_camera_config is not None:
+            # A wired camera supplies the lens; the distance is settled below, since
+            # its own distance assumes the single-view path's cropped framing.
+            camera_angle_x = float(moge_camera_config['camera_angle_x'])
+            mesh_scale = float(moge_camera_config.get('mesh_scale', 1.0))
+        else:
+            camera_angle_x = float(fov) if fov_unit == "rad" else math.radians(float(fov))
+
+        pils = comfy_images_to_rgba_pils(
+            images, masks=masks, invert_mask=invert_mask,
+            remove_background=remove_background, max_views=len(az_list),
+        )
+        if len(pils) != len(az_list):
+            raise Exception(
+                f"got {len(pils)} images but {len(az_list)} azimuth/elevation pairs")
+
+        fill = mv_camera.measure_object_fill(pils)
+        fill_frame = mv_camera.camera_distance_for_fov(camera_angle_x, mesh_scale)
+        print(f"[Pixal3D MV] views fill {100 * fill:.1f}% of the frame "
+              f"(fill_frame distance would be {fill_frame:.4f})")
+
+        if distance > 0:
+            print(f"[Pixal3D MV] framing: distance {distance:.4f} set explicitly")
+        elif framing == "auto":
+            distance = mv_camera.camera_distance_for_extent(
+                camera_angle_x, fill * 512 / 2, mesh_scale)
+            print(f"[Pixal3D MV] framing=auto: distance {distance:.4f} fitted to the views")
+        elif framing == "pixal3d_rig":
+            distance = fill_frame * mv_camera.PIXAL3D_RIG_MARGIN
+            print(f"[Pixal3D MV] framing=pixal3d_rig: distance {distance:.4f} "
+                  f"({mv_camera.PIXAL3D_RIG_MARGIN}x fill_frame, the trained 10% margin)")
+        elif framing == "fill_frame":
+            distance = fill_frame
+            print(f"[Pixal3D MV] framing=fill_frame: distance {distance:.4f}")
+        elif framing == "camera_config":
+            if moge_camera_config is None:
+                raise Exception("framing=camera_config needs a moge_camera_config input")
+            distance = float(moge_camera_config['distance'])
+            print(f"[Pixal3D MV] framing=camera_config: distance {distance:.4f}")
+        else:
+            raise Exception(f"unknown framing {framing!r}")
+
+        # The projection scales with distance, so a mismatch here quietly makes every
+        # grid point sample the wrong pixel -- loudest in the texture stage.
+        fitted = mv_camera.camera_distance_for_extent(camera_angle_x, fill * 512 / 2, mesh_scale)
+        if abs(distance - fitted) / fitted > 0.03:
+            print(f"[Pixal3D MV] Warning: distance {distance:.4f} does not match how the views "
+                  f"are framed ({fitted:.4f} would). The projection is off by "
+                  f"{100 * abs(distance - fitted) / fitted:.1f}%, which washes out the texture. "
+                  f"Try framing=auto.")
+
+        views = mv_camera.build_views_from_angles(
+            pils, az_list, el_list, camera_angle_x,
+            mesh_scale=mesh_scale, distance=distance,
+        )
+        mv_camera.check_main_view(views)
+
+        cam_config = {'camera_angle_x': camera_angle_x,
+                      'distance': float(distance),
+                      'mesh_scale': float(mesh_scale)}
+
+        return (views, cam_config, pixal3d_views_to_preview(views),)
+
+
+class Trellis2Pixal3DLoadMultiViewFolder:
+    """
+    Load a Pixal3D multi-view input folder (the inference_mv.py format).
+
+        <folder_path>/
+            transforms.json     mesh_scale + per-frame file_path / transform_matrix
+            view00_azim000.png  RGBA alpha is used as the mask when present
+            ...
+
+    transform_matrix is a 4x4 camera-to-world in the Blender/NeRF convention (Z-up
+    world, each camera looking along its own -Z with its own +Y up) and
+    camera_angle_x is the horizontal fov in radians, given per frame or once at the
+    top level. Frame 0 is the main view.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "folder_path": ("STRING", {"default": ""}),
+                "num_views": ("INT", {"default": 0, "min": 0, "max": 64,
+                                      "tooltip": "0 = every frame in transforms.json"}),
+                "remove_background": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("PIXAL3D_MV_VIEWS", "MOGE_CAM_CONFIG", "IMAGE",)
+    RETURN_NAMES = ("pixal3d_mv_views", "moge_camera_config", "preview",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self, folder_path, num_views, remove_background):
+        from .trellis2.utils import mv_camera
+
+        if not os.path.isdir(folder_path):
+            raise Exception(f"Folder not found: {folder_path}")
+        if not os.path.exists(os.path.join(folder_path, 'transforms.json')):
+            raise Exception(f"No transforms.json in {folder_path}")
+
+        rembg = None
+        if remove_background:
+            from rembg import remove
+            rembg = lambda im: remove(im.convert('RGB'))
+
+        views = mv_camera.load_views_from_dir(
+            folder_path,
+            num_views=None if num_views <= 0 else int(num_views),
+            rembg=rembg,
+        )
+        mv_camera.check_main_view(views)
+
+        cam_config = {'camera_angle_x': float(views['camera_angle_x'][0, 0]),
+                      'distance': float(views['camera_distance'][0, 0]),
+                      'mesh_scale': float(views['mesh_scale'])}
+
+        return (views, cam_config, pixal3d_views_to_preview(views),)
+
 NODE_CLASS_MAPPINGS = {
     "Trellis2LoadModel": Trellis2LoadModel,
     "Trellis2MeshWithVoxelGenerator": Trellis2MeshWithVoxelGenerator,
@@ -7956,6 +8324,8 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2SelectImagesForMultiView": Trellis2SelectImagesForMultiView,
     "Trellis2SmoothMeshWithPyMeshlab": Trellis2SmoothMeshWithPyMeshlab,
     "Trellis2SmoothTrimeshWithPyMeshlab": Trellis2SmoothTrimeshWithPyMeshlab,
+    "Trellis2Pixal3DMultiViewConfig": Trellis2Pixal3DMultiViewConfig,
+    "Trellis2Pixal3DLoadMultiViewFolder": Trellis2Pixal3DLoadMultiViewFolder,
     }
     
 
@@ -8035,4 +8405,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2SelectImagesForMultiView": "Trellis2 - Select Images For MultiView",
     "Trellis2SmoothMeshWithPyMeshlab": "Trellis2 - Smooth Mesh With PyMeshlab",
     "Trellis2SmoothTrimeshWithPyMeshlab": "Trellis2 - Smooth Trimesh With PyMeshlab",
+    "Trellis2Pixal3DMultiViewConfig": "Trellis2 - Pixal3D MultiView Config",
+    "Trellis2Pixal3DLoadMultiViewFolder": "Trellis2 - Pixal3D Load MultiView Folder",
     }

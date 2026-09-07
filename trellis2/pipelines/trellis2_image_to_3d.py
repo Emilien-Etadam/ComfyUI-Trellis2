@@ -32,7 +32,13 @@ def build_pixal3d_image_cond_model(config: dict):
     from ..trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor
     model = DinoV3ProjFeatureExtractor(**config)
     model.eval()
-    return model   
+    return model
+
+def build_pixal3d_mv_image_cond_model(config: dict):
+    from ..trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjMultiViewFeatureExtractor
+    model = DinoV3ProjMultiViewFeatureExtractor(**config)
+    model.eval()
+    return model
 
 def pil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0)[None,]
@@ -142,8 +148,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 "use_naf_upsample": True,
                 "naf_target_size": 1024,
             },
-        }        
-        
+        }
+
+        # Multi-view variants of the four stages. Same DINOv3 backbone and grid
+        # resolutions as above -- only the extractor class and the fusion differ.
+        # "average" keeps the fused feature shape identical to single-view, which is
+        # why the *_mv denoisers need no architectural change.
+        self.PIXAL3D_MV_IMAGE_COND_CONFIGS = {
+            key: {**cfg, "multiview_fusion": "average"}
+            for key, cfg in self.PIXAL3D_IMAGE_COND_CONFIGS.items()
+        }
     def switch_samplers(self, sampler_type: str = "euler"):
         """Dynamically switches the sampler instances based on user selection."""
         self._sampler_prefix = "Euler"
@@ -186,7 +200,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             torch.cuda.empty_cache()
 
     @classmethod
-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True, use_fp8 = False, use_reconviagen = False, isPixal3D = False) -> "Trellis2ImageTo3DPipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True, use_fp8 = False, use_reconviagen = False, isPixal3D = False, isPixal3DMV = False) -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
 
@@ -197,6 +211,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             config_file = "reconviagen_pipeline.json"
         elif use_fp8:
             config_file = "pipeline_fp8.json"
+        elif isPixal3DMV:
+            # The multi-view denoisers live next to the single-view ones under
+            # ckpts/*_mv in the same repo; this config file is what points at them.
+            config_file = "pipeline_mv.json"
             
         pipeline = super().from_pretrained(path, config_file)
         args = pipeline._pretrained_args
@@ -233,7 +251,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.last_processing = ''
         pipeline.use_fp8 = use_fp8
         pipeline.isPixal3D = isPixal3D
-        
+        pipeline.isPixal3DMV = isPixal3DMV
+
         if not isPixal3D:
             pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16")
             
@@ -244,6 +263,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.PIXAL3D_IMAGE_COND_CONFIGS["shape_512"]["model_name"] = facebook_model_path
         pipeline.PIXAL3D_IMAGE_COND_CONFIGS["shape_1024"]["model_name"] = facebook_model_path
         pipeline.PIXAL3D_IMAGE_COND_CONFIGS["tex_1024"]["model_name"] = facebook_model_path
+
+        for _cfg in pipeline.PIXAL3D_MV_IMAGE_COND_CONFIGS.values():
+            _cfg["model_name"] = facebook_model_path
 
         try:
             from mmgp import safetensors2 as _mmgp_st2
@@ -345,7 +367,50 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if hasattr(self,'pixal3d_image_cond_tex_1024') and self.pixal3d_image_cond_tex_1024 is not None:
             del self.pixal3d_image_cond_tex_1024
             self.pixal3d_image_cond_tex_1024 = None
-            self._cleanup_cuda()         
+            self._cleanup_cuda()
+
+    # ---- Pixal3D multi-view image cond models (DinoV3ProjMultiViewFeatureExtractor) ----
+
+    def _load_pixal3d_mv_image_cond(self, stage: str):
+        attr = f'pixal3d_mv_image_cond_{stage}'
+        model = getattr(self, attr, None)
+        if model is not None:
+            return model
+
+        print(f'Loading Pixal3D MultiView Image Cond {stage} Model ...')
+        model = build_pixal3d_mv_image_cond_model(self.PIXAL3D_MV_IMAGE_COND_CONFIGS[stage])
+        setattr(self, attr, model)
+        return model
+
+    def _unload_pixal3d_mv_image_cond(self, stage: str):
+        attr = f'pixal3d_mv_image_cond_{stage}'
+        if getattr(self, attr, None) is not None:
+            setattr(self, attr, None)
+            self._cleanup_cuda()
+
+    def load_pixal3d_mv_image_cond_ss(self):
+        return self._load_pixal3d_mv_image_cond('ss')
+
+    def unload_pixal3d_mv_image_cond_ss(self):
+        self._unload_pixal3d_mv_image_cond('ss')
+
+    def load_pixal3d_mv_image_cond_shape_512(self):
+        return self._load_pixal3d_mv_image_cond('shape_512')
+
+    def unload_pixal3d_mv_image_cond_shape_512(self):
+        self._unload_pixal3d_mv_image_cond('shape_512')
+
+    def load_pixal3d_mv_image_cond_shape_1024(self):
+        return self._load_pixal3d_mv_image_cond('shape_1024')
+
+    def unload_pixal3d_mv_image_cond_shape_1024(self):
+        self._unload_pixal3d_mv_image_cond('shape_1024')
+
+    def load_pixal3d_mv_image_cond_tex_1024(self):
+        return self._load_pixal3d_mv_image_cond('tex_1024')
+
+    def unload_pixal3d_mv_image_cond_tex_1024(self):
+        self._unload_pixal3d_mv_image_cond('tex_1024')
         
     def load_sparse_structure_model(self):        
         if self.models['sparse_structure_flow_model'] is None:
@@ -646,6 +711,134 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             'neg_cond': {'global': torch.zeros_like(z_global), 'proj': SparseTensor(feats=torch.zeros_like(z_proj_sparse), coords=coords)},
         }
         
+    # ------------------------------------------------------------------
+    # Pixal3D multi-view proj conditioning
+    #
+    # Same cascade as the single-view Pixal3D path (SS -> Shape 512 -> Shape 1024
+    # -> Tex 1024); the only difference is the image condition. Instead of one
+    # image at the canonical front view it takes V views with explicit c2w
+    # matrices and lets DinoV3ProjMultiViewFeatureExtractor project all of them
+    # into the shared 3D grid, averaging the per-view features.
+    #
+    # Because the fusion is "average", the fused z_proj has exactly the
+    # single-view shape [B, R^3, C], so every per-block proj_linear / proj
+    # cross-attn weight of the *_mv denoisers stays compatible. View 0 is the
+    # main view and its calc_mat_0 == F by construction, so V=1 degenerates to
+    # the single-view path.
+    #
+    # `views` is the bundle built by trellis2.utils.mv_camera.build_views().
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mv_image_for(views: dict, image_cond_model: nn.Module) -> torch.Tensor:
+        """
+        Pick the pre-decoded [1, V, 3, H, W] batch matching this stage input size.
+
+        Unlike the single-view extractor (which takes PIL and resizes internally), the
+        multi-view one takes tensors, so the caller has to supply the right resolution:
+        the SS / shape-512 stages run at 512 and the 1024 stages at 1024.
+        """
+        size = int(image_cond_model.image_size)
+        if size not in views['images']:
+            raise KeyError(
+                f"No view images at resolution {size}; got {sorted(views['images'])}. "
+                f"Build them with mv_camera.build_views(image_sizes=...).")
+        return views['images'][size]
+
+    def _run_mv_extractor(self, image_cond_model: nn.Module, views: dict):
+        device = self.device
+        image = self._mv_image_for(views, image_cond_model).to(device)
+        cam_angle = views['camera_angle_x'].to(device=device, dtype=torch.float32)
+        dist = views['camera_distance'].to(device=device, dtype=torch.float32)
+        transform_matrix = views['transform_matrix'].to(device=device, dtype=torch.float32)
+        # mesh_scale is per-object, i.e. [B]; the extractor expands it over views.
+        scale = torch.as_tensor(views['mesh_scale'], dtype=torch.float32, device=device).reshape(-1)
+        return image_cond_model(
+            image,
+            camera_angle_x=cam_angle,
+            distance=dist,
+            mesh_scale=scale,
+            transform_matrix=transform_matrix,
+        )
+
+    @torch.no_grad()
+    def get_proj_cond_ss_mv(
+        self,
+        views: dict,
+        image_cond_model: nn.Module = None,
+    ) -> dict:
+        """Multi-view proj conditioning for the sparse structure stage (dense grid)."""
+        print('Getting MultiView Proj Image Cond ...')
+        if image_cond_model is None:
+            image_cond_model = self.load_pixal3d_mv_image_cond_ss()
+        # The MV cond models are built lazily, after pipeline.to(), so they always
+        # start on CPU -- move them in regardless of mode and only offload again
+        # when low_vram is on.
+        image_cond_model.to(self.device)
+        z_global, z_proj = self._run_mv_extractor(image_cond_model, views)
+        if self.low_vram:
+            image_cond_model.cpu()
+        return {
+            'cond': {'global': z_global, 'proj': z_proj},
+            'neg_cond': {'global': torch.zeros_like(z_global), 'proj': torch.zeros_like(z_proj)},
+        }
+
+    @torch.no_grad()
+    def get_proj_cond_shape_mv(
+        self,
+        image_cond_model: nn.Module,
+        views: dict,
+        coords: torch.Tensor,
+        grid_resolution_override: int = None,
+    ) -> dict:
+        """Multi-view proj conditioning for the shape / texture stages (sparse tokens)."""
+        print('Getting MultiView Projected Image Cond ...')
+        device = self.device
+        # See get_proj_cond_ss_mv: these models are built after pipeline.to().
+        image_cond_model.to(device)
+
+        # The HR cascade grid resolution floats with the token budget (1536/16=96 and
+        # down), so it can differ from what this stage was trained at; swap the grid.
+        orig_grid_res = image_cond_model.grid_resolution
+        override = (grid_resolution_override is not None
+                    and grid_resolution_override != orig_grid_res)
+        if override:
+            image_cond_model.grid_resolution = grid_resolution_override
+            image_cond_model.proj_grid = image_cond_model.proj_grid.__class__(
+                grid_resolution=grid_resolution_override,
+                image_resolution=image_cond_model.proj_grid.image_resolution,
+            ).to(device)
+
+        z_global, z_proj = self._run_mv_extractor(image_cond_model, views)
+
+        B = z_global.shape[0]
+        grid_res = image_cond_model.grid_resolution
+        b_idx = coords[:, 0].long()
+        x_idx = coords[:, 1].long()
+        y_idx = coords[:, 2].long()
+        z_idx = coords[:, 3].long()
+        z_proj_grid = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)
+        z_proj_sparse = z_proj_grid[b_idx, x_idx, y_idx, z_idx]
+        z_proj_st = SparseTensor(feats=z_proj_sparse, coords=coords)
+
+        if override:
+            image_cond_model.grid_resolution = orig_grid_res
+            image_cond_model.proj_grid = image_cond_model.proj_grid.__class__(
+                grid_resolution=orig_grid_res,
+                image_resolution=image_cond_model.proj_grid.image_resolution,
+            ).to(device)
+
+        if self.low_vram:
+            image_cond_model.cpu()
+        return {
+            'cond': {'global': z_global, 'proj': z_proj_st},
+            'neg_cond': {
+                'global': torch.zeros_like(z_global),
+                'proj': SparseTensor(feats=torch.zeros_like(z_proj_sparse), coords=coords),
+            },
+        }
+
+
     @torch.no_grad()        
     def get_moge_camera_config(self, image):
         from ..utils.camera import get_camera_params_wild_moge

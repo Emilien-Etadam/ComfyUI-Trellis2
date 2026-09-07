@@ -976,7 +976,7 @@
         "widget_ue_connectable": {}
       },
       "widgets_values": [
-        "TencentARC/Pixal3D-T",
+        "TencentARC/Pixal3D",
         "flash_attn",
         "cuda",
         true,
