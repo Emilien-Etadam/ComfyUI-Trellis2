@@ -967,7 +967,11 @@ class Trellis2ExportMesh:
         from comfy_api.latest import Types
         file_3d = Types.File3D(str(output_glb_path))
         
-        return (str(output_glb_path), str(relative_path), file_3d,)        
+        saved_name = f'{filename}_{counter:05}_.{file_format}'
+        return {
+            "ui": {"3d": [{"filename": saved_name, "subfolder": subfolder, "type": "output"}]},
+            "result": (str(output_glb_path), str(relative_path), file_3d,),
+        }      
         
 class Trellis2PostProcessMesh:
     @classmethod
