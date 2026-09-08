@@ -572,13 +572,42 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['tex_slat_flow_model_1024'] = None
             self._cleanup_cuda()
 
+    def _shape_slat_encoder_path(self) -> str:
+        """
+        Resolve the shape VAE encoder, falling back to the TRELLIS.2-4B copy.
+
+        Pixal3D ships the shape decoder but no encoder, so encoding an existing mesh
+        (Mesh Texturing) has nothing to load from its own ckpts. Its shape VAE is the
+        TRELLIS.2-4B one -- shape_dec_next_dc_f16c32_fp16 is byte-identical in both
+        repos -- so the TRELLIS.2-4B encoder is the matching half and puts the mesh in
+        the very latent space Pixal3D's denoisers were trained on.
+        """
+        local = f"{self.path}/ckpts/shape_enc_next_dc_f16c32_fp16"
+        if os.path.exists(f"{local}.safetensors"):
+            return local
+
+        trellis2_dir = os.path.join(folder_paths.models_dir, 'microsoft', 'TRELLIS.2-4B')
+        fallback = os.path.join(trellis2_dir, 'ckpts', 'shape_enc_next_dc_f16c32_fp16')
+        if not os.path.exists(f"{fallback}.safetensors"):
+            print('Shape Slat Encoder not found. Downloading it from microsoft/TRELLIS.2-4B ...')
+            from huggingface_hub import hf_hub_download
+            os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+            for ext in ('json', 'safetensors'):
+                hf_hub_download(
+                    repo_id='microsoft/TRELLIS.2-4B',
+                    filename=f'ckpts/shape_enc_next_dc_f16c32_fp16.{ext}',
+                    local_dir=trellis2_dir,
+                    local_dir_use_symlinks=False,
+                )
+        return fallback
+
     def load_shape_slat_encoder(self):        
         if self.models['shape_slat_encoder'] is None:
             print('Loading Shape Slat Encoder model ...')
             if getattr(self, 'use_fp8', False):
                 self.models['shape_slat_encoder'] = models.from_pretrained(f"{self.path}/ckpts_fp8/shape_enc_next_dc_f16c32_fp8") 
             else:           
-                self.models['shape_slat_encoder'] = models.from_pretrained(f"{self.path}/ckpts/shape_enc_next_dc_f16c32_fp16")
+                self.models['shape_slat_encoder'] = models.from_pretrained(self._shape_slat_encoder_path())
             self.models['shape_slat_encoder'].eval()
             self.models['shape_slat_encoder'].to(self._device)
             if hasattr(self.models['shape_slat_encoder'], 'low_vram'):
@@ -3563,7 +3592,263 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         
         out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, mesh_cluster_threshold_cone_half_angle_rad, inpainting)
         return out_mesh, baseColorTexture, metallicRoughnessTexture        
-    
+
+    # Reorientations that map an incoming mesh into the frame preprocess_mesh expects,
+    # named and defined exactly like Trellis2MeshWithVoxelToTrimesh's reorient_vertices.
+    # The pipeline's own TRIMESH frame is Z-up (that node's "90 degrees" output), so a
+    # plain Y-up glb needs "90 degrees" applied again to get there.
+    MESH_ORIENTATIONS = {
+        'none': np.eye(4),
+        '90 degrees': np.array([[1., 0., 0., 0.],      # (x, y, z) -> (x, z, -y)
+                                [0., 0., 1., 0.],
+                                [0., -1., 0., 0.],
+                                [0., 0., 0., 1.]]),
+        '-90 degrees': np.array([[1., 0., 0., 0.],     # (x, y, z) -> (x, -z, y)
+                                 [0., 0., -1., 0.],
+                                 [0., 1., 0., 0.],
+                                 [0., 0., 0., 1.]]),
+    }
+
+    def _view_silhouettes(self, mesh: trimesh.Trimesh, views: dict) -> List[np.ndarray]:
+        """
+        Rasterise the mesh through each view's conditioning camera.
+
+        Uses calc_mat (F @ inv(C_0) @ C_i) and the same intrinsics as
+        project_points_to_image_batch, so the silhouettes show what the conditioning
+        actually reads -- not merely what the input poses say.
+        """
+        from ..trainers.flow_matching.mixins.image_conditioned_proj import (
+            ProjGridMV, compute_relative_calc_mat)
+        from ..utils import mv_camera
+
+        res = mv_camera.ALPHA_SIZE
+        device = self.device
+
+        F_mat = ProjGridMV(grid_resolution=2, image_resolution=64).front_view_transform_matrix
+        calc_mat = compute_relative_calc_mat(
+            views['transform_matrix'].to(device).float(),
+            views['camera_distance'].to(device).float(),
+            F_mat.to(device).float(),
+        )[0]                                                        # [V, 4, 4]
+        cam_angle = views['camera_angle_x'][0].float()
+        mesh_scale = float(views['mesh_scale'])
+
+        # preprocess_mesh puts the mesh in [-0.5, 0.5]^3; ProjGrid's world box is the
+        # [-1, 1] grid over 2*mesh_scale, so world = preprocessed / mesh_scale.
+        pre = self.preprocess_mesh(mesh)
+        verts = torch.tensor(np.asarray(pre.vertices) / mesh_scale,
+                             dtype=torch.float32, device=device)
+        # ... then into the Blender frame ProjGrid projects from.
+        rot = torch.tensor([[1., 0., 0.], [0., 0., -1.], [0., 1., 0.]], device=device)
+        verts = verts @ rot.T
+        faces = torch.tensor(np.asarray(pre.faces), dtype=torch.int32, device=device).contiguous()
+
+        try:
+            glctx = dr.RasterizeCudaContext()
+        except Exception:
+            glctx = dr.RasterizeGLContext()
+
+        out = []
+        near, far = 0.05, 100.0
+        for i in range(calc_mat.shape[0]):
+            w2c = torch.linalg.inv(calc_mat[i])
+            vc = verts @ w2c[:3, :3].T + w2c[:3, 3]
+            f = 1.0 / torch.tan(cam_angle[i] / 2).to(device)
+            clip = torch.stack([
+                f * vc[:, 0], f * vc[:, 1],
+                -(far + near) / (far - near) * vc[:, 2] - 2 * far * near / (far - near),
+                -vc[:, 2],
+            ], dim=-1)[None].contiguous()
+            rast, _ = dr.rasterize(glctx, clip, faces, resolution=[res, res])
+            # nvdiffrast's row 0 is the bottom row; the masks have row 0 at the top.
+            out.append(torch.flip(rast[0, ..., 3] > 0, dims=[0]))
+        del glctx
+        return out
+
+    @torch.no_grad()
+    def fit_mesh_orientation(self, mesh: trimesh.Trimesh, views: dict,
+                             candidates: List[str] = None) -> Tuple[str, float, dict]:
+        """
+        Pick the reorientation whose silhouette best matches the views.
+
+        The projected conditioning has no way to notice that a mesh is posed
+        differently from the cameras: it just reads whatever the surface projects onto,
+        so a mesh in the wrong frame samples background everywhere and the texture
+        comes out near-black rather than failing. Scoring the silhouette against the
+        view masks catches that before 3 minutes of sampling.
+
+        Returns (name, mean IoU, {name: mean IoU}).
+        """
+        if views.get('alphas') is None:
+            raise ValueError('views has no alpha masks; rebuild it with mv_camera.build_views')
+        if candidates is None:
+            candidates = list(self.MESH_ORIENTATIONS)
+
+        masks = (views['alphas'][0].to(self.device) > 0.8)
+        scores = {}
+        for name in candidates:
+            probe = mesh.copy()
+            probe.apply_transform(self.MESH_ORIENTATIONS[name])
+            ious = []
+            for sil, m in zip(self._view_silhouettes(probe, views), masks):
+                inter = (sil & m).sum().item()
+                union = (sil | m).sum().item()
+                ious.append(inter / union if union else 0.0)
+            scores[name] = float(np.mean(ious))
+            print(f'[Pixal3D MV] orientation {name!r}: silhouette IoU '
+                  f'{", ".join(f"{v*100:.0f}%" for v in ious)} (mean {scores[name]*100:.0f}%)')
+
+        best = max(scores, key=scores.get)
+        return best, scores[best], scores
+
+    @torch.inference_mode()
+    def texture_mesh_pixal3d(
+        self,
+        mesh: trimesh.Trimesh,
+        views: dict = None,
+        image: Image.Image = None,
+        camera_params: dict = None,
+        seed: int = 42,
+        tex_slat_sampler_params: dict = {},
+        resolution: int = 1024,
+        texture_size: int = 2048,
+        texture_alpha_mode = 'OPAQUE',
+        double_side_material = True,
+        bake_on_vertices = False,
+        use_custom_normals = False,
+        mesh_cluster_threshold_cone_half_angle_rad = 60.0,
+        sampler: str = 'euler',
+        inpainting: str = 'telea',
+        verbose: bool = False,
+        dino_lock: float = 0.0,
+        dino_substeps: int = 4,
+        dino_foundation_cap: float = 0.92,
+        mesh_orientation: str = 'auto',
+    ):
+        """
+        Texture an existing mesh with Pixal3D, i.e. run only the tex stage of its
+        cascade over a shape latent that came from a mesh instead of the shape stages.
+
+        The mesh takes the place the generated shape latent normally holds: encode it
+        with the shape VAE, then condition the tex denoiser on the same projected
+        image features the cascade uses (get_proj_cond_shape*), at the grid resolution
+        implied by `resolution`. `sample_tex_slat` concatenates the shape latent, so
+        the tex denoiser sees exactly what it does mid-cascade.
+
+        Unlike texture_mesh_multiview (global DINO features blended per view by a
+        heuristic), the conditioning here is a geometric un-projection: the views need
+        no blending, any number of them fuse by averaging, but the mesh has to be
+        posed and scaled the way the cameras describe. preprocess_mesh normalises to a
+        tight bbox in [-0.5, 0.5]^3, so if the views frame the object differently the
+        grid samples off-surface and the texture washes out -- build the views with
+        framing = auto (Trellis2 - Pixal3D MultiView Config), which fits the camera
+        distance to the silhouette.
+
+        Args:
+            views: the bundle from mv_camera.build_views(); needs the multi-view
+                weights (pipeline_mv.json). Takes precedence over `image`.
+            image: single view, for the non-multi-view Pixal3D weights. Needs
+                `camera_params` (camera_angle_x / distance / mesh_scale).
+            mesh_orientation: how to rotate the mesh into the frame the cameras
+                describe -- 'auto' fits it by silhouette (needs `views`), or name one
+                of MESH_ORIENTATIONS. The output is rotated back, so the textured mesh
+                comes out in the frame it went in.
+        """
+        if views is None and image is None:
+            raise ValueError('texture_mesh_pixal3d needs either views or an image')
+        if views is None and camera_params is None:
+            raise ValueError('texture_mesh_pixal3d needs camera_params alongside a single image')
+        if resolution % 16 != 0:
+            raise ValueError(f'resolution must be a multiple of 16, got {resolution}')
+
+        self.switch_samplers(sampler)
+
+        if mesh_orientation == 'auto':
+            if views is None:
+                # Nothing to score a silhouette against.
+                print("[Pixal3D] mesh_orientation 'auto' has no view masks to fit against on "
+                      "the single-image path; assuming 'none'. A y-up glb needs '90 degrees' "
+                      "-- set it explicitly if the texture comes out near-black.")
+                mesh_orientation = 'none'
+            else:
+                mesh_orientation, iou, _ = self.fit_mesh_orientation(mesh, views)
+                print(f'[Pixal3D] mesh_orientation auto -> {mesh_orientation!r} (IoU {iou*100:.0f}%)')
+                if iou < 0.5:
+                    print('[Pixal3D] Warning: even the best orientation matches the views '
+                          f'only {iou*100:.0f}%. Check that the azimuths/elevations describe '
+                          'these views, that the mesh is the object in them, and that '
+                          'framing = auto.')
+        if mesh_orientation not in self.MESH_ORIENTATIONS:
+            raise ValueError(f'unknown mesh_orientation {mesh_orientation!r}; '
+                             f'expected auto or one of {list(self.MESH_ORIENTATIONS)}')
+
+        reorient = self.MESH_ORIENTATIONS[mesh_orientation]
+        if mesh_orientation != 'none':
+            mesh = mesh.copy()
+            mesh.apply_transform(reorient)
+
+        mesh = self.preprocess_mesh(mesh)
+        seed_all(seed)
+
+        shape_slat = self.encode_shape_slat(mesh, resolution)
+
+        # The cascade drives the cond grid off the resolution it upsampled to; here
+        # that is just the grid the encoder produced, i.e. resolution // 16.
+        tex_grid_res = resolution // 16
+
+        if views is not None:
+            image_cond_model = self.load_pixal3d_mv_image_cond_tex_1024()
+            cond = self.get_proj_cond_shape_mv(
+                image_cond_model, views, shape_slat.coords,
+                grid_resolution_override=tex_grid_res,
+            )
+            del image_cond_model
+            if not self.keep_models_loaded:
+                self.unload_pixal3d_mv_image_cond_tex_1024()
+        else:
+            images = list(image) if isinstance(image, (list, tuple)) else [image]
+            image_cond_model = self.load_pixal3d_image_cond_tex_1024()
+            cond = self.get_proj_cond_shape(
+                image_cond_model, images, shape_slat.coords,
+                camera_angle_x=camera_params['camera_angle_x'],
+                distance=camera_params['distance'],
+                mesh_scale=camera_params.get('mesh_scale', 1.0),
+                grid_resolution_override=tex_grid_res,
+            )
+            del image_cond_model
+            if not self.keep_models_loaded:
+                self.unload_pixal3d_image_cond_tex_1024()
+
+        torch.cuda.empty_cache()
+
+        # Pixal3D has no 512 tex denoiser; the 1024 one is rope-based and is what the
+        # cascade already runs at every resolution it upsamples to.
+        self.load_tex_slat_flow_model_1024()
+        tex_slat = self.sample_tex_slat(
+            cond, self.models['tex_slat_flow_model_1024'],
+            shape_slat, tex_slat_sampler_params,
+            verbose = verbose,
+            dino_lock = dino_lock,
+            dino_substeps = dino_substeps,
+            dino_foundation_cap = dino_foundation_cap
+        )
+        if not self.keep_models_loaded:
+            self.unload_tex_slat_flow_model_1024()
+
+        del cond
+        torch.cuda.empty_cache()
+        pbr_voxel = self.decode_tex_slat(tex_slat)
+        torch.cuda.empty_cache()
+
+        out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, mesh_cluster_threshold_cone_half_angle_rad, inpainting)
+
+        # preprocess/postprocess_mesh are inverses, so the mesh comes back in the frame
+        # it went into them; undo the reorientation too, to hand back the caller's frame.
+        if mesh_orientation != 'none':
+            out_mesh.apply_transform(np.linalg.inv(reorient))
+
+        return out_mesh, baseColorTexture, metallicRoughnessTexture
+
     def get_coords_from_trimesh(self, mesh, resolution):
         vertices = torch.from_numpy(mesh.vertices).float()
         faces = torch.from_numpy(mesh.faces).long()

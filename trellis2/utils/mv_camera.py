@@ -57,6 +57,9 @@ _WORLD_UP = (0.0, 0.0, 1.0)
 # object until it fills the frame.
 PIXAL3D_RIG_MARGIN = 1.1
 
+# Resolution the per-view masks are kept at, for silhouette checks only.
+ALPHA_SIZE = 512
+
 
 def camera_distance_for_extent(camera_angle_x: float, half_extent_px: float,
                                mesh_scale: float = 1.0, image_resolution: int = 512) -> float:
@@ -223,6 +226,17 @@ def build_views(
         for size in image_sizes                                           # [1, V, 3, S, S]
     }
 
+    # The conditioning images are alpha-premultiplied, so a dark object is
+    # indistinguishable from background in them. Keep the masks separately -- that is
+    # what a silhouette check (fit_mesh_orientation) needs to tell whether a mesh is
+    # posed the way these cameras describe.
+    alphas = torch.stack([
+        torch.tensor(np.array(im.convert('RGBA')
+                              .resize((ALPHA_SIZE, ALPHA_SIZE), Image.Resampling.LANCZOS)
+                              .getchannel(3))).float() / 255.0
+        for im in images
+    ], dim=0)[None]                                                       # [1, V, S, S]
+
     if view_names is None:
         view_names = [f"view{i:02d}" for i in range(V)]
 
@@ -232,6 +246,7 @@ def build_views(
 
     return {
         'images': bundle_images,
+        'alphas': alphas,
         'camera_angle_x': cax,
         'camera_distance': camera_distance,
         'transform_matrix': tm,

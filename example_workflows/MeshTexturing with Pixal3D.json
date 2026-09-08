@@ -1,0 +1,792 @@
+{
+  "id": "759342bb-744a-4afa-90ae-92c19b9a88be",
+  "revision": 0,
+  "last_node_id": 32,
+  "last_link_id": 29,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "Trellis2LoadMesh",
+      "pos": [
+        -3946.555858396243,
+        4830.563545196109
+      ],
+      "size": [
+        300.095703125,
+        82
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "trimesh",
+          "type": "TRIMESH",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2LoadMesh"
+      },
+      "widgets_values": [
+        "C:\\Travaux\\Rimuru_3D.glb",
+        false
+      ],
+      "widgets_values_named": {
+        "glb_path": "C:\\Travaux\\Rimuru_3D.glb",
+        "only_vertices_and_faces": false
+      }
+    },
+    {
+      "id": 17,
+      "type": "BatchImagesNode",
+      "pos": [
+        -4169.328444961045,
+        4947.077808694696
+      ],
+      "size": [
+        140,
+        106
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": 13
+        },
+        {
+          "name": "images.image1",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 14
+        },
+        {
+          "name": "images.image2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 15
+        },
+        {
+          "name": "images.image3",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            16
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "BatchImagesNode"
+      }
+    },
+    {
+      "id": 13,
+      "type": "Trellis2Pixal3DMultiViewConfig",
+      "pos": [
+        -3921.8074167155683,
+        4988.107064124985
+      ],
+      "size": [
+        347.66015625,
+        290
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 16
+        },
+        {
+          "name": "masks",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "name": "moge_camera_config",
+          "shape": 7,
+          "type": "MOGE_CAM_CONFIG",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pixal3d_mv_views",
+          "type": "PIXAL3D_MV_VIEWS",
+          "links": [
+            23
+          ]
+        },
+        {
+          "name": "moge_camera_config",
+          "type": "MOGE_CAM_CONFIG",
+          "links": [
+            25
+          ]
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2Pixal3DMultiViewConfig"
+      },
+      "widgets_values": [
+        "0,90,180",
+        "0,0,0",
+        0.1,
+        "rad",
+        1,
+        0,
+        false,
+        false,
+        "auto"
+      ],
+      "widgets_values_named": {
+        "azimuths": "0,90,180",
+        "elevations": "0,0,0",
+        "fov": 0.1,
+        "fov_unit": "rad",
+        "mesh_scale": 1,
+        "distance": 0,
+        "remove_background": false,
+        "invert_mask": false,
+        "framing": "auto"
+      }
+    },
+    {
+      "id": 14,
+      "type": "Trellis2LoadImageWithTransparency",
+      "pos": [
+        -4935.05186993715,
+        4777.234091036305
+      ],
+      "size": [
+        314.6997010026156,
+        390.17747690166925
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "image_with_alpha",
+          "type": "IMAGE",
+          "links": [
+            13,
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency"
+      },
+      "widgets_values": [
+        "Rimuru_Front.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "Rimuru_Front.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 12,
+      "type": "Trellis2LoadModel",
+      "pos": [
+        -3957.156502525757,
+        4410.740682598691
+      ],
+      "size": [
+        283.349609375,
+        250
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "pipeline",
+          "type": "TRELLIS2PIPELINE",
+          "links": [
+            21
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2LoadModel"
+      },
+      "widgets_values": [
+        "TencentARC/Pixal3D",
+        "flash_attn",
+        "cuda",
+        true,
+        false,
+        "flex_gemm",
+        "flash_attn",
+        false,
+        true
+      ],
+      "widgets_values_named": {
+        "modelname": "TencentARC/Pixal3D",
+        "backend": "flash_attn",
+        "device": "cuda",
+        "low_vram": true,
+        "keep_models_loaded": false,
+        "conv_backend": "flex_gemm",
+        "sparse_backend": "flash_attn",
+        "use_reconviagen": false,
+        "pixal3d_multiview": true
+      }
+    },
+    {
+      "id": 16,
+      "type": "Trellis2LoadImageWithTransparency",
+      "pos": [
+        -4928.340096252822,
+        5236.061381907661
+      ],
+      "size": [
+        314.6997010026156,
+        390.17747690166925
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "image_with_alpha",
+          "type": "IMAGE",
+          "links": [
+            14
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency"
+      },
+      "widgets_values": [
+        "Image_1024_00227_.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "Image_1024_00227_.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 15,
+      "type": "Trellis2LoadImageWithTransparency",
+      "pos": [
+        -4525.987077331534,
+        5234.150601332578
+      ],
+      "size": [
+        314.6997010026156,
+        390.17747690166925
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "image_with_alpha",
+          "type": "IMAGE",
+          "links": [
+            15
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency"
+      },
+      "widgets_values": [
+        "Image_1024_00226_.png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "Image_1024_00226_.png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 19,
+      "type": "Trellis2ExportMesh",
+      "pos": [
+        -2916.8244182148565,
+        4634.524873512722
+      ],
+      "size": [
+        270,
+        122
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "trimesh",
+          "type": "TRIMESH",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "glb_path",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "relative_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "model_3d",
+          "type": "FILE_3D",
+          "links": [
+            29
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2ExportMesh"
+      },
+      "widgets_values": [
+        "Rimuru_P3D_1024",
+        "glb"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "Rimuru_P3D_1024",
+        "file_format": "glb"
+      }
+    },
+    {
+      "id": 27,
+      "type": "Trellis2MeshTexturingPixal3DMultiView",
+      "pos": [
+        -3472.1825617262434,
+        4637.888545018394
+      ],
+      "size": [
+        419.15234375,
+        642
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline",
+          "type": "TRELLIS2PIPELINE",
+          "link": 21
+        },
+        {
+          "name": "trimesh",
+          "type": "TRIMESH",
+          "link": 22
+        },
+        {
+          "name": "pixal3d_mv_views",
+          "shape": 7,
+          "type": "PIXAL3D_MV_VIEWS",
+          "link": 23
+        },
+        {
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 24
+        },
+        {
+          "name": "moge_camera_config",
+          "shape": 7,
+          "type": "MOGE_CAM_CONFIG",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trimesh",
+          "type": "TRIMESH",
+          "links": [
+            26
+          ]
+        },
+        {
+          "name": "base_color_texture",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "metallic_roughness_texture",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "ver": "87491a6420cfdf65a79f58782163cc0148efd513",
+        "Node name for S&R": "Trellis2MeshTexturingPixal3DMultiView"
+      },
+      "widgets_values": [
+        12345,
+        "fixed",
+        12,
+        1,
+        0.5,
+        3,
+        1024,
+        2048,
+        "OPAQUE",
+        false,
+        0.6,
+        0.9,
+        false,
+        false,
+        60,
+        "auto",
+        "euler",
+        "telea",
+        false,
+        0,
+        5,
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 12345,
+        "control_after_generate": "fixed",
+        "texture_steps": 12,
+        "texture_guidance_strength": 1,
+        "texture_guidance_rescale": 0.5,
+        "texture_rescale_t": 3,
+        "resolution": 1024,
+        "texture_size": 2048,
+        "texture_alpha_mode": "OPAQUE",
+        "double_side_material": false,
+        "texture_guidance_interval_start": 0.6,
+        "texture_guidance_interval_end": 0.9,
+        "bake_on_vertices": false,
+        "use_custom_normals": false,
+        "mesh_cluster_threshold_cone_half_angle_rad": 60,
+        "mesh_orientation": "auto",
+        "sampler": "euler",
+        "inpainting": "telea",
+        "verbose": false,
+        "dino_lock": 0,
+        "dino_substeps": 5,
+        "dino_foundation_cap": 1
+      }
+    },
+    {
+      "id": 30,
+      "type": "Preview3DAdvanced",
+      "pos": [
+        -2917.1508627052895,
+        4811.286329952889
+      ],
+      "size": [
+        792.9444713556263,
+        966.4697042965545
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model_3d",
+          "type": "FILE_3D_GLB,FILE_3D_GLTF,FILE_3D_FBX,FILE_3D_OBJ,FILE_3D_STL,FILE_3D_USDZ,FILE_3D",
+          "link": 29
+        },
+        {
+          "name": "model_3d_info",
+          "shape": 7,
+          "type": "LOAD3D_MODEL_INFO",
+          "link": null
+        },
+        {
+          "name": "camera_info",
+          "shape": 7,
+          "type": "LOAD3D_CAMERA",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_3d",
+          "type": "FILE_3D",
+          "links": null
+        },
+        {
+          "name": "model_3d_info",
+          "type": "LOAD3D_MODEL_INFO",
+          "links": null
+        },
+        {
+          "name": "camera_info",
+          "type": "LOAD3D_CAMERA",
+          "links": null
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "Preview3DAdvanced",
+        "Camera Config": {
+          "cameraType": "perspective",
+          "fov": 35,
+          "state": {
+            "position": {
+              "x": -0.665585719053298,
+              "y": 0.5121245853121424,
+              "z": 0.6877965355795258
+            },
+            "target": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "zoom": 1,
+            "cameraType": "perspective"
+          }
+        },
+        "Last Time Model File": "preview3d_advanced_184e39189db24f4ca7cbee796f783ab3.glb [temp]",
+        "Light Config": {
+          "intensity": 3,
+          "hdri": {
+            "enabled": false,
+            "hdriPath": "",
+            "showAsBackground": false,
+            "intensity": 1
+          }
+        },
+        "Scene Config": {
+          "showGrid": true,
+          "backgroundColor": "#282828",
+          "backgroundImage": "",
+          "backgroundRenderMode": "tiled",
+          "models": []
+        },
+        "Model Config": {
+          "upDirection": "original",
+          "materialMode": "original",
+          "showSkeleton": false,
+          "gizmo": {
+            "enabled": false,
+            "mode": "translate",
+            "position": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          }
+        }
+      },
+      "widgets_values": [
+        "",
+        1024,
+        1024
+      ],
+      "widgets_values_named": {
+        "viewport_state": "",
+        "width": 1024,
+        "height": 1024
+      }
+    }
+  ],
+  "links": [
+    [
+      13,
+      14,
+      2,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      16,
+      2,
+      17,
+      1,
+      "IMAGE"
+    ],
+    [
+      15,
+      15,
+      2,
+      17,
+      2,
+      "IMAGE"
+    ],
+    [
+      16,
+      17,
+      0,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      21,
+      12,
+      0,
+      27,
+      0,
+      "TRELLIS2PIPELINE"
+    ],
+    [
+      22,
+      10,
+      0,
+      27,
+      1,
+      "TRIMESH"
+    ],
+    [
+      23,
+      13,
+      0,
+      27,
+      2,
+      "PIXAL3D_MV_VIEWS"
+    ],
+    [
+      24,
+      14,
+      2,
+      27,
+      3,
+      "IMAGE"
+    ],
+    [
+      25,
+      13,
+      1,
+      27,
+      4,
+      "MOGE_CAM_CONFIG"
+    ],
+    [
+      26,
+      27,
+      0,
+      19,
+      0,
+      "TRIMESH"
+    ],
+    [
+      29,
+      19,
+      2,
+      30,
+      0,
+      "FILE_3D"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.5054470284993056,
+      "offset": [
+        5262.785779634466,
+        -4220.7667180975695
+      ]
+    },
+    "frontendVersion": "1.51.10",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

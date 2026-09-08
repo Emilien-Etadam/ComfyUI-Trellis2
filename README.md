@@ -14,6 +14,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-09-08** | Pixal3D: Added node "Mesh Texturing Pixal3D MultiView"<br>"Export Mesh" node exports model_3d compatible with new "Preview 3D" node  |
 | **2026-09-07** | Add support for Pixal3D MultiView |
 | **2026-07-31** | Added new nodes "Smooth Mesh with PyMeshlab" and "Smooth Trimesh with PyMeshlab" |
 | **2026-06-02** | Added new node "Render MultiView (Nvdiffrast)"<br>Thanks GiusTex |

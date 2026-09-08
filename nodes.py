@@ -942,8 +942,8 @@ class Trellis2ExportMesh:
             }
         }
 
-    RETURN_TYPES = ("STRING","STRING",)
-    RETURN_NAMES = ("glb_path","relative_path",)
+    RETURN_TYPES = ("STRING","STRING","FILE_3D",)
+    RETURN_NAMES = ("glb_path","relative_path","model_3d",)
     FUNCTION = "process"
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
@@ -964,7 +964,10 @@ class Trellis2ExportMesh:
             
         relative_path = Path(subfolder) / f'{filename}_{counter:05}_.{file_format}'
         
-        return (str(output_glb_path), str(relative_path), )        
+        from comfy_api.latest import Types
+        file_3d = Types.File3D(str(output_glb_path))
+        
+        return (str(output_glb_path), str(relative_path), file_3d,)        
         
 class Trellis2PostProcessMesh:
     @classmethod
@@ -2850,7 +2853,7 @@ class Trellis2MeshTexturing:
         verbose, dino_lock, dino_substeps, dino_foundation_cap, moge_camera_config = None):
             
         if pipeline.isPixal3D:
-            raise Exception('Pixal3D does not support Mesh Texturing')
+            raise Exception('Pixal3D does not support this node: its denoisers take projected image features, not the global DINO conditioning built here. Use Trellis2 - Mesh Texturing Pixal3D MultiView instead.')
         
         images = tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
@@ -3001,14 +3004,160 @@ class Trellis2MeshTexturingMultiView:
         baseColorTexture = pil2tensor(baseColorTexture_np)
         metallicRoughnessTexture = pil2tensor(metallicRoughnessTexture_np)
         
-        return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )        
-        
+        return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
+
+class Trellis2MeshTexturingPixal3DMultiView:
+    """
+    Texture an existing mesh with Pixal3D, conditioned on posed multi-view images.
+
+    Runs only the texture stage of the Pixal3D cascade: the mesh is encoded with the
+    shape VAE and takes the place the generated shape latent normally holds, then the
+    tex denoiser is conditioned on the views projected into that same grid.
+
+    Pixal3D projects the views geometrically instead of blending global DINO features
+    the way Trellis2 - Mesh Texturing Multi-View does, so there is nothing to blend
+    (no front_axis / blend_temperature) and any number of views fuse by averaging --
+    but the mesh has to be posed and scaled the way the cameras describe. The mesh is
+    normalised to a tight bbox, so build the views with framing = auto (Trellis2 -
+    Pixal3D MultiView Config): a distance that disagrees with how the views are framed
+    makes the surface sample the background, which washes out the texture.
+
+    The mesh must also be axis-aligned the way the views are, i.e. azimuth 0 has to be
+    its front. Wire `image` + `moge_camera_config` instead of `pixal3d_mv_views` to run
+    the single-view Pixal3D weights.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("TRELLIS2PIPELINE",),
+                "trimesh": ("TRIMESH",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
+                "texture_steps": ("INT",{"default":12, "min":1, "max":100},),
+                "texture_guidance_strength": ("FLOAT",{"default":1.00,"min":0.00,"max":99.99,"step":0.01}),
+                "texture_guidance_rescale": ("FLOAT",{"default":0.00,"min":0.00,"max":1.00,"step":0.01}),
+                "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}),
+                "resolution": ([1024,1536],{"default":1024,"tooltip":"Pixal3D has no 512 texture denoiser. The projected cond grid is 96^3 x 2048 at 1536 against 64^3 at 1024: measured peak allocation ~32 GB vs ~20 GB, so both lean on shared system memory on a 16 GB card and 1536 leans much harder."}),
+                "texture_size": ("INT",{"default":4096,"min":512,"max":16384}),
+                "texture_alpha_mode": (["OPAQUE","MASK","BLEND"],{"default":"OPAQUE"}),
+                "double_side_material": ("BOOLEAN",{"default":False}),
+                "texture_guidance_interval_start": ("FLOAT",{"default":0.60,"min":0.00,"max":1.00,"step":0.01}),
+                "texture_guidance_interval_end": ("FLOAT",{"default":0.90,"min":0.00,"max":1.00,"step":0.01}),
+                "bake_on_vertices": ("BOOLEAN",{"default":False}),
+                "use_custom_normals": ("BOOLEAN",{"default":False}),
+                "mesh_cluster_threshold_cone_half_angle_rad": ("FLOAT",{"default":60.0,"min":0.0,"max":359.9}),
+                "mesh_orientation": (["auto","none","90 degrees","-90 degrees"],{"default":"auto","tooltip":"Rotates the mesh into the frame the cameras describe, then rotates the result back. auto fits it by silhouette against the views. A Y-up glb (Load Mesh) needs \"90 degrees\"; a mesh straight out of Mesh With Voxel To Trimesh is already there, so \"none\". Getting this wrong is what makes the texture come out near-black."}),
+                "sampler": (["euler", "heun", "rk4", "rk5"], {"default": "euler"}),
+                "inpainting": (["telea","ns"],{"default":"telea"}),
+                "verbose": ("BOOLEAN",{"default":False}),
+                "dino_lock": ("FLOAT",{"default":0.00,"min":0.00,"max":1.00,"step":0.01}),
+                "dino_substeps": ("INT",{"default":4,"min":1,"max":99,"step":1}),
+                "dino_foundation_cap": ("FLOAT",{"default":1.00,"min":0.01,"max":1.00,"step":0.01}),
+            },
+            "optional": {
+                "pixal3d_mv_views": ("PIXAL3D_MV_VIEWS",),
+                "image": ("IMAGE",),
+                "moge_camera_config": ("MOGE_CAM_CONFIG",),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
+    RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+    OUTPUT_NODE = True
+
+    def process(self,
+        pipeline,
+        trimesh,
+        seed,
+        texture_steps,
+        texture_guidance_strength,
+        texture_guidance_rescale,
+        texture_rescale_t,
+        resolution,
+        texture_size,
+        texture_alpha_mode,
+        double_side_material,
+        texture_guidance_interval_start,
+        texture_guidance_interval_end,
+        bake_on_vertices,
+        use_custom_normals,
+        mesh_cluster_threshold_cone_half_angle_rad,
+        mesh_orientation,
+        sampler,
+        inpainting,
+        verbose,
+        dino_lock,
+        dino_substeps,
+        dino_foundation_cap,
+        pixal3d_mv_views = None,
+        image = None,
+        moge_camera_config = None):
+
+        if not pipeline.isPixal3D:
+            raise Exception('This node needs the Pixal3D pipeline. Select TencentARC/Pixal3D in '
+                            'Trellis2 - LoadModel, or use Trellis2 - Mesh Texturing Multi-View '
+                            'for TRELLIS.2.')
+
+        if pixal3d_mv_views is None and image is None:
+            raise Exception('Wire pixal3d_mv_views (multi-view weights), or image + '
+                            'moge_camera_config for the single-view ones.')
+
+        camera_params = None
+        image_in = None
+        if pixal3d_mv_views is not None:
+            check_pixal3d_mv_pipeline(pipeline)
+            if image is not None:
+                print('[Pixal3D MV] pixal3d_mv_views is wired; ignoring the image input.')
+        else:
+            if moge_camera_config is None:
+                raise Exception('moge_camera_config is required when texturing from a single image')
+            images = tensor_batch_to_pil_list(image, max_views=16)
+            image_in = images[0] if len(images) == 1 else images
+            camera_params = moge_camera_config
+
+        reset_cuda()
+
+        texture_guidance_interval = [texture_guidance_interval_start,texture_guidance_interval_end]
+
+        tex_slat_sampler_params = {"steps":texture_steps,"guidance_strength":texture_guidance_strength,"guidance_rescale":texture_guidance_rescale,"guidance_interval":texture_guidance_interval,"rescale_t":texture_rescale_t}
+
+        textured_mesh, baseColorTexture_np, metallicRoughnessTexture_np = pipeline.texture_mesh_pixal3d(
+            mesh = trimesh,
+            views = pixal3d_mv_views,
+            image = image_in,
+            camera_params = camera_params,
+            seed = seed,
+            tex_slat_sampler_params = tex_slat_sampler_params,
+            resolution = resolution,
+            texture_size = texture_size,
+            texture_alpha_mode = texture_alpha_mode,
+            double_side_material = double_side_material,
+            bake_on_vertices = bake_on_vertices,
+            use_custom_normals = use_custom_normals,
+            mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad,
+            sampler = sampler,
+            inpainting = inpainting,
+            verbose = verbose,
+            dino_lock = dino_lock,
+            dino_substeps = dino_substeps,
+            dino_foundation_cap = dino_foundation_cap,
+            mesh_orientation = mesh_orientation
+        )
+
+        baseColorTexture = pil2tensor(baseColorTexture_np)
+        metallicRoughnessTexture = pil2tensor(metallicRoughnessTexture_np)
+
+        return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
+
 class Trellis2LoadMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "glb_path": ("STRING", {"default": "", "tooltip": "The glb path with mesh to load."}), 
+                "glb_path": ("STRING", {"default": "", "tooltip": "The glb path with mesh to load."}),
+                "only_vertices_and_faces": ("BOOLEAN",{"default":False}),
             }
         }
     RETURN_TYPES = ("TRIMESH",)
@@ -3019,11 +3168,14 @@ class Trellis2LoadMesh:
     CATEGORY = "Trellis2Wrapper"
     DESCRIPTION = "Loads a glb model from the given path."
 
-    def load(self, glb_path):
+    def load(self, glb_path, only_vertices_and_faces = False):
         if not os.path.exists(glb_path):
             glb_path = os.path.join(folder_paths.get_input_directory(), glb_path)
         
         trimesh = Trimesh.load(glb_path, force="mesh")
+        
+        if only_vertices_and_faces:
+            trimesh = Trimesh.Trimesh(vertices=trimesh.vertices,faces=trimesh.faces)        
         
         return (trimesh,)  
         
@@ -8324,7 +8476,27 @@ class Trellis2SelectImagesForPixal3DMultiView:
         
         output_images = torch.cat(allimages, dim=0)
 
-        return (output_images, azimuths, elevations, )        
+        return (output_images, azimuths, elevations, )     
+
+class Trellis2StringToFile3D:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "glb_path": ("STRING",{"default":""}),
+            },
+        }
+
+    RETURN_TYPES = ("FILE_3D",)
+    RETURN_NAMES = ("model_3d",)
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper"
+
+    def process(self, glb_path):
+        from comfy_api.latest import Types
+        file_3d = Types.File3D(glb_path)
+        
+        return (file_3d, )          
 
 NODE_CLASS_MAPPINGS = {
     "Trellis2LoadModel": Trellis2LoadModel,
@@ -8405,6 +8577,8 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2Pixal3DMultiViewConfig": Trellis2Pixal3DMultiViewConfig,
     "Trellis2Pixal3DLoadMultiViewFolder": Trellis2Pixal3DLoadMultiViewFolder,
     "Trellis2SelectImagesForPixal3DMultiView": Trellis2SelectImagesForPixal3DMultiView,
+    "Trellis2MeshTexturingPixal3DMultiView": Trellis2MeshTexturingPixal3DMultiView,
+    "Trellis2StringToFile3D": Trellis2StringToFile3D,
     }
     
 
@@ -8487,4 +8661,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2Pixal3DMultiViewConfig": "Trellis2 - Pixal3D MultiView Config",
     "Trellis2Pixal3DLoadMultiViewFolder": "Trellis2 - Pixal3D Load MultiView Folder",
     "Trellis2SelectImagesForPixal3DMultiView": "Trellis2 - Select Images For Pixal3D MultiView",
+    "Trellis2MeshTexturingPixal3DMultiView": "Trellis2 - Mesh Texturing Pixal3D MultiView",
+    "Trellis2StringToFile3D": "Trellis2 - String To File3D",
     }
