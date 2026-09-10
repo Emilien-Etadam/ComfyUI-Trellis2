@@ -152,8 +152,10 @@ info "dependances des roues natives"
 python -m pip install plyfile easydict trimesh zstandard
 
 # rembg (detourage) est declare sans moteur d'inference : sans extra, il
-# s'installe sans onnxruntime et echoue au premier appel. Le backend CPU
-# suffit pour une image et evite un onnxruntime-gpu compile pour CUDA 12.
+# s'installe sans onnxruntime et echoue au premier appel. Backend CPU
+# volontairement : detourer une image coute une a deux secondes au
+# processeur, la ou onnxruntime-gpu occuperait en permanence de la VRAM
+# qu'il faut garder pour le remaillage.
 python -m pip install "rembg[cpu]"
 
 # ------------------------------------------------- 8. extensions CUDA natives
