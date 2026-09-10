@@ -63,6 +63,12 @@ dans ce venv, y compris lance par un autre installateur, reste verrouille.
   script. Il n'est importe qu'a l'interieur d'une fonction (`nodes.py`, noeud de
   nettoyage de maillage) : rien d'autre ne casse, `pymeshlab` et `meshlib`
   couvrent les memes operations.
+- **`plyfile`, `easydict`, `trimesh`, `zstandard` sont a installer a la main.**
+  Les roues natives sont posees avec `--no-deps`, faute de quoi pip ferait
+  remonter torch et casserait l'ABI. Leurs dependances Python ne sont alors
+  declarees nulle part : `o_voxel` importe `plyfile` des le chargement du
+  module, et le fork GGUF a besoin d'`easydict`. Sans elles, les deux noeuds
+  Trellis2 echouent a l'import au demarrage de ComfyUI.
 - **Ne pas lancer `install.py` du fork GGUF tel quel.** Il retelecharge ses
   propres roues CUDA depuis ses releases, sans garantie d'architecture, et
   ecraserait le jeu `Torch2110`. Le script n'appelle que sa fonction

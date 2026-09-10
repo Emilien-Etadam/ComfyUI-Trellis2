@@ -143,6 +143,14 @@ for req in "$TRELLIS_SRC/requirements.txt" \
 done
 python -m pip install "$SMART_UV_WHL" || info "Smart-UV-Projection indisponible (methode d'UV 'Smart' desactivee)"
 
+# Les roues natives sont posees avec --no-deps (sinon pip ferait remonter
+# torch) : leurs dependances Python ne sont donc declarees nulle part. o_voxel
+# importe plyfile des le chargement du module, et le fork GGUF a besoin
+# d'easydict pour son monkeypatch. Sans elles, les deux noeuds echouent a
+# l'import au demarrage de ComfyUI.
+info "dependances des roues natives"
+python -m pip install plyfile easydict trimesh zstandard
+
 # ------------------------------------------------- 8. extensions CUDA natives
 step "8. Extensions CUDA (jeu $WHEEL_SET, sans compilation)"
 python "$TRELLIS_SRC/install/check_wheel_arch.py" --require 8.9 \
