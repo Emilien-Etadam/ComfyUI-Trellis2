@@ -151,6 +151,11 @@ python -m pip install "$SMART_UV_WHL" || info "Smart-UV-Projection indisponible 
 info "dependances des roues natives"
 python -m pip install plyfile easydict trimesh zstandard
 
+# rembg (detourage) est declare sans moteur d'inference : sans extra, il
+# s'installe sans onnxruntime et echoue au premier appel. Le backend CPU
+# suffit pour une image et evite un onnxruntime-gpu compile pour CUDA 12.
+python -m pip install "rembg[cpu]"
+
 # ------------------------------------------------- 8. extensions CUDA natives
 step "8. Extensions CUDA (jeu $WHEEL_SET, sans compilation)"
 python "$TRELLIS_SRC/install/check_wheel_arch.py" --require 8.9 \

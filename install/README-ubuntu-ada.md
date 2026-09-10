@@ -69,6 +69,11 @@ dans ce venv, y compris lance par un autre installateur, reste verrouille.
   declarees nulle part : `o_voxel` importe `plyfile` des le chargement du
   module, et le fork GGUF a besoin d'`easydict`. Sans elles, les deux noeuds
   Trellis2 echouent a l'import au demarrage de ComfyUI.
+- **`rembg` doit etre installe avec l'extra `[cpu]`.** Les `requirements.txt`
+  le declarent sans moteur d'inference : il s'installe alors sans
+  onnxruntime et echoue au premier detourage. Le backend CPU traite une
+  image en quelques secondes et evite un `onnxruntime-gpu` compile pour
+  CUDA 12 face au CUDA 13 de cette pile.
 - **Ne pas lancer `install.py` du fork GGUF tel quel.** Il retelecharge ses
   propres roues CUDA depuis ses releases, sans garantie d'architecture, et
   ecraserait le jeu `Torch2110`. Le script n'appelle que sa fonction
