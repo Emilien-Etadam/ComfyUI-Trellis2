@@ -62,6 +62,16 @@ def scan_wheel(path):
     return found
 
 
+def scan_target(path):
+    """Un .whl, un repertoire de paquet, ou une bibliotheque native isolee."""
+    if os.path.isdir(path):
+        return scan_directory(path)
+    if path.endswith(".whl"):
+        return scan_wheel(path)
+    with open(path, "rb") as handle:
+        return scan_blob(handle.read())
+
+
 def scan_directory(path):
     found = collections.Counter()
     for root, _dirs, files in os.walk(path):
@@ -92,15 +102,25 @@ def main():
                         help="echoue si une cible n'a aucun cubin utilisable sur cette capacite")
     args = parser.parse_args()
 
-    targets = list(args.targets)
+    targets = [(os.path.basename(t.rstrip("/")).split("-")[0] or t, t) for t in args.targets]
     if args.installed:
+        import glob
         import importlib.util
+        import sysconfig
+
+        site_packages = sysconfig.get_paths()["purelib"]
         for module in ("cumesh", "flex_gemm", "o_voxel", "nvdiffrast", "nvdiffrec_render"):
             spec = importlib.util.find_spec(module)
-            if spec and spec.origin:
-                targets.append(os.path.dirname(spec.origin))
-            else:
+            if spec is None:
                 print("%-28s ABSENT du venv" % module)
+                continue
+            if spec.origin and os.path.isdir(os.path.dirname(spec.origin)):
+                targets.append((module, os.path.dirname(spec.origin)))
+            # Certains paquets (nvdiffrast) posent leur binaire a la racine de
+            # site-packages, hors du repertoire du module : sans cela on
+            # conclurait a tort a l'absence de code machine.
+            for lib in glob.glob(os.path.join(site_packages, "*%s*.so" % module)):
+                targets.append((module + " (natif)", lib))
     if not targets:
         parser.error("rien a scanner")
 
@@ -110,14 +130,10 @@ def main():
         required = (int(major), int(minor))
 
     failures = 0
-    for target in targets:
-        if os.path.isdir(target):
-            found = scan_directory(target)
-        else:
-            found = scan_wheel(target)
-        label = os.path.basename(target.rstrip("/")).split("-")[0] or target
+    for label, target in targets:
+        found = scan_target(target)
         if not found:
-            print("%-28s aucun fatbin lisible" % label)
+            print("%-28s aucun code machine ici (sources compilees a la volee ?)" % label)
             continue
         summary = ", ".join(
             "%s sm_%d" % (kind, sm) for kind, sm in sorted(found, key=lambda k: (k[0], k[1]))
