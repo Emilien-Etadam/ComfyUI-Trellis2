@@ -246,7 +246,9 @@ export CUDA_VISIBLE_DEVICES="\${CUDA_VISIBLE_DEVICES:-0}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$VENV/bin/activate"
 cd "$COMFY"
-exec python main.py --listen 127.0.0.1 --port "\${COMFY_PORT:-8188}" "\$@"
+# 127.0.0.1 n'ouvre que la boucle locale. COMFY_LISTEN=0.0.0.0 expose
+# l'interface a tout le reseau local : ComfyUI n'a aucune authentification.
+exec python main.py --listen "\${COMFY_LISTEN:-127.0.0.1}" --port "\${COMFY_PORT:-8188}" "\$@"
 EOF
 chmod +x "$TRELLIS_ROOT/run-comfy.sh"
 
