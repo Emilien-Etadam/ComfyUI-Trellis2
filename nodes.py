@@ -3183,6 +3183,36 @@ class Trellis2LoadMesh:
         
         return (trimesh,)  
         
+# rembg choisit bria-rmbg quand on ne lui demande rien, et la licence de ce
+# modele exclut l'usage commercial. Le choix est donc expose, avec BiRefNet par
+# defaut : c'est l'architecture dont bria-rmbg est un reentrainement, publiee
+# sous licence MIT.
+REMBG_MODELS = [
+    "birefnet-general",
+    "birefnet-general-lite",
+    "isnet-general-use",
+    "u2net",
+    "bria-rmbg",
+]
+REMBG_DEFAULT = "birefnet-general"
+
+_REMBG_SESSIONS = {}
+
+
+def rembg_remove(image, model_name=REMBG_DEFAULT):
+    """Detoure une image PIL avec le modele demande.
+
+    La session porte le reseau charge : sans elle, rembg le relit a chaque
+    appel, ce qui coute plus que le detourage lui-meme sur une serie de vues.
+    """
+    from rembg import remove, new_session
+
+    session = _REMBG_SESSIONS.get(model_name)
+    if session is None:
+        session = _REMBG_SESSIONS[model_name] = new_session(model_name)
+    return remove(image, session=session)
+
+
 class Trellis2PreProcessImage:
     @classmethod
     def INPUT_TYPES(s):
@@ -3192,6 +3222,9 @@ class Trellis2PreProcessImage:
                 "padding": ("INT",{"default":0,"min":0,"max":1024}),
                 "remove_background": ("BOOLEAN",{"default":False}),
                 "max_size": ("INT",{"default":2048,"min":512,"max":8192,"step":128}),
+            },
+            "optional": {
+                "rembg_model": (REMBG_MODELS, {"default": REMBG_DEFAULT}),
             }
         }
     RETURN_TYPES = ("IMAGE",)
@@ -3200,13 +3233,12 @@ class Trellis2PreProcessImage:
     FUNCTION = "process"
     CATEGORY = "Trellis2Wrapper"
 
-    def process(self, image, padding, remove_background, max_size):
+    def process(self, image, padding, remove_background, max_size, rembg_model=REMBG_DEFAULT):
         if image.ndim == 3:
             image = tensor2pil(image)
             
             if remove_background:
-                from rembg import remove
-                image = remove(image)
+                image = rembg_remove(image, rembg_model)
             
             image = self.preprocess_image(image, max_size)
             
@@ -3221,8 +3253,7 @@ class Trellis2PreProcessImage:
             tensor_list = []
             for img in images:
                 if remove_background:
-                    from rembg import remove
-                    img = remove(img)
+                    img = rembg_remove(img, rembg_model)
                 
                 img = self.preprocess_image(img, max_size)
                 
@@ -8086,7 +8117,8 @@ class Trellis2SelectImagesForMultiView:
             "optional":{
                 "back": ("STRING",{"default":""}),
                 "left": ("STRING",{"default":""}),
-                "right": ("STRING",{"default":""})
+                "right": ("STRING",{"default":""}),
+                "rembg_model": (REMBG_MODELS, {"default": REMBG_DEFAULT})
             }
         }
 
@@ -8110,7 +8142,7 @@ class Trellis2SelectImagesForMultiView:
         image = image.convert("RGBA" if 'A' in image.getbands() else "RGB")
         return pil2tensor(image)
 
-    def process(self, front, preprocess, padding, remove_background, max_size, back = None, left = None, right = None):
+    def process(self, front, preprocess, padding, remove_background, max_size, back = None, left = None, right = None, rembg_model = REMBG_DEFAULT):
 
         front_image = self.load_view(front)
         back_image = self.load_view(back)
@@ -8125,19 +8157,19 @@ class Trellis2SelectImagesForMultiView:
 
             # process() is a ComfyUI node function: it returns a 1-tuple, so unwrap it.
             if front_image is not None:
-                front_image = t2preprocess.process(front_image, padding, remove_background, max_size)[0]
+                front_image = t2preprocess.process(front_image, padding, remove_background, max_size, rembg_model)[0]
             if back_image is not None:
-                back_image = t2preprocess.process(back_image, padding, remove_background, max_size)[0]
+                back_image = t2preprocess.process(back_image, padding, remove_background, max_size, rembg_model)[0]
             if left_image is not None:
-                left_image = t2preprocess.process(left_image, padding, remove_background, max_size)[0]
+                left_image = t2preprocess.process(left_image, padding, remove_background, max_size, rembg_model)[0]
             if right_image is not None:
-                right_image = t2preprocess.process(right_image, padding, remove_background, max_size)[0]
+                right_image = t2preprocess.process(right_image, padding, remove_background, max_size, rembg_model)[0]
 
         return (front_image, back_image, left_image, right_image, )
         
         
 def comfy_images_to_rgba_pils(images, masks=None, invert_mask=False, remove_background=False,
-                              max_views=16):
+                              max_views=16, rembg_model=REMBG_DEFAULT):
     """
     Turn a ComfyUI IMAGE batch into the RGBA PIL views the Pixal3D MV path expects.
 
@@ -8191,8 +8223,7 @@ def comfy_images_to_rgba_pils(images, masks=None, invert_mask=False, remove_back
                 raise ValueError(
                     f"view {i} has no alpha channel and no mask. Give it a MASK, an "
                     f"RGBA image, or turn remove_background on.")
-            from rembg import remove
-            pil = remove(pil).convert('RGBA')
+            pil = rembg_remove(pil, rembg_model).convert('RGBA')
         else:
             pil = pil.convert('RGBA')
             pil.putalpha(Image.fromarray((alpha.numpy() * 255.0).astype(np.uint8), mode='L'))
@@ -8262,6 +8293,7 @@ class Trellis2Pixal3DMultiViewConfig:
             "optional": {
                 "masks": ("MASK",),
                 "moge_camera_config": ("MOGE_CAM_CONFIG",),
+                "rembg_model": (REMBG_MODELS, {"default": REMBG_DEFAULT}),
             }
         }
 
@@ -8273,7 +8305,7 @@ class Trellis2Pixal3DMultiViewConfig:
 
     def process(self, images, azimuths, elevations, fov, fov_unit, mesh_scale, distance,
                 remove_background, invert_mask, framing="auto", masks=None,
-                moge_camera_config=None):
+                moge_camera_config=None, rembg_model=REMBG_DEFAULT):
         from .trellis2.utils import mv_camera
 
         az_list = Trellis2ImagesToViewConfigs()._parse_angles(azimuths)
@@ -8294,6 +8326,7 @@ class Trellis2Pixal3DMultiViewConfig:
         pils = comfy_images_to_rgba_pils(
             images, masks=masks, invert_mask=invert_mask,
             remove_background=remove_background, max_views=len(az_list),
+            rembg_model=rembg_model,
         )
         if len(pils) != len(az_list):
             raise Exception(
@@ -8370,6 +8403,9 @@ class Trellis2Pixal3DLoadMultiViewFolder:
                                       "tooltip": "0 = every frame in transforms.json"}),
                 "remove_background": ("BOOLEAN", {"default": False}),
             },
+            "optional": {
+                "rembg_model": (REMBG_MODELS, {"default": REMBG_DEFAULT}),
+            },
         }
 
     RETURN_TYPES = ("PIXAL3D_MV_VIEWS", "MOGE_CAM_CONFIG", "IMAGE",)
@@ -8378,7 +8414,7 @@ class Trellis2Pixal3DLoadMultiViewFolder:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, folder_path, num_views, remove_background):
+    def process(self, folder_path, num_views, remove_background, rembg_model=REMBG_DEFAULT):
         from .trellis2.utils import mv_camera
 
         if not os.path.isdir(folder_path):
@@ -8388,8 +8424,7 @@ class Trellis2Pixal3DLoadMultiViewFolder:
 
         rembg = None
         if remove_background:
-            from rembg import remove
-            rembg = lambda im: remove(im.convert('RGB'))
+            rembg = lambda im: rembg_remove(im.convert('RGB'), rembg_model)
 
         views = mv_camera.load_views_from_dir(
             folder_path,
